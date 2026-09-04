@@ -6,6 +6,10 @@
 #define txPin GPIO_NUM_5
 #define rxPin GPIO_NUM_4
 
+void configMSG(twai_message_t* message);
+void printMSG(twai_message_t* message);
+void errorHandler(esp_err_t result);
+
 int mode;
 twai_message_t message;
 
