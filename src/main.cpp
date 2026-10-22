@@ -12,7 +12,8 @@
 
 [[noreturn]] void fatal(const char *why)
 {
-    Serial.printf("FATAL Err: %s\n", why);
+    // please remember to send \r\n everywhere because some terminals are stupid
+    Serial.printf("FATAL Err: %s\r\n", why);
 
     while (true)
     {
@@ -32,7 +33,7 @@ void log_error(esp_err_t status)
         break;
 
     default:
-        Serial.printf("Err: ESP_ERR '%s'\n", esp_err_to_name(status));
+        Serial.printf("Err: ESP_ERR %x '%s'\r\n", status, esp_err_to_name(status));
     }
 }
 
@@ -77,7 +78,7 @@ esp_err_t transmit_message(char *input_string)
 
         if (nibble_or_death >> 4)
         {
-            Serial.printf("Err: Can't parse hex digit '%c'\n", c);
+            Serial.printf("Err: Can't parse hex digit '%c'\r\n", c);
             return ESP_ERR_INVALID_ARG;
         }
 
@@ -98,14 +99,14 @@ esp_err_t transmit_message(char *input_string)
     {
         if (data_index >= TWAI_FRAME_MAX_DLC)
         {
-            Serial.printf("Err: CAN data exceeds max of 8 bytes\n");
+            Serial.printf("Err: CAN data exceeds max of 8 bytes\r\n");
             return ESP_ERR_INVALID_ARG;
         }
 
         uint8_t nibble_or_death = char_to_nibble(c);
         if (nibble_or_death >> 4)
         {
-            Serial.printf("Err: Can't parse hex digit '%c'\n", c);
+            Serial.printf("Err: Can't parse hex digit '%c'\r\n", c);
             return ESP_ERR_INVALID_ARG;
         }
 
@@ -119,7 +120,7 @@ esp_err_t transmit_message(char *input_string)
     if (lower)
     {
         data_index++;
-        Serial.printf("Warn: Padding last byte. Pls gimmie even bytes\n");
+        Serial.printf("Warn: Padding last byte. Pls gimmie even bytes\r\n");
     }
 
     message.data_length_code = data_index;
@@ -130,7 +131,10 @@ esp_err_t transmit_message(char *input_string)
 void setup()
 {
     Serial.begin(SERIAL_BAUD);
-    twai_general_config_t gen_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_PIN, RX_PIN, TWAI_MODE_LISTEN_ONLY);
+
+    // no ack to not like inject nonsense vomit into the cars bus
+    twai_general_config_t gen_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_PIN, RX_PIN, TWAI_MODE_NO_ACK);
+
     // idk how fast actual data comes in but just to be safe
     gen_config.rx_queue_len = 64;
 
@@ -167,7 +171,7 @@ void loop()
         {
             Serial.printf("%02x ", message.data[i]);
         }
-        Serial.print("'\n");
+        Serial.print("'\r\n");
     }
 
     static char input_buffer[128] = {};
@@ -179,16 +183,23 @@ void loop()
         size_t buffer_idx = strlen(input_buffer);
 
         char c = Serial.read();
-        if (c == '\r')
-            continue;
 
-        if (c == '\n')
+        if (c == '\n' || c == '\r')
         {
+            if (buffer_idx == 0)
+                continue;
+
+            Serial.print("\r\n");
+            Serial.printf("Send: '%s'\r\n", input_buffer);
+
             esp_err_t status = transmit_message(input_buffer);
             log_error(status);
             input_buffer[0] = '\0';
             continue;
         }
+
+        // lotsa terminal emulators dont do echoing
+        Serial.print(c);
 
         if (buffer_idx >= buffer_len - 1)
             continue;
