@@ -148,6 +148,7 @@ void setup()
         fatal("TWAI driver unable to start");
 
     Serial.println("Yay! Ready!");
+    Serial.println("Send a CAN packet with '<can id> <can data>', with both formatted as hex");
 }
 
 void loop()
