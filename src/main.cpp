@@ -10,6 +10,11 @@
 
 #define SERIAL_BAUD 115200
 
+#define CAN_FILTER_LENGTH 64
+#define CAN_FILTER_EMPTY (1U << 31)
+
+uint32_t can_id_filter[CAN_FILTER_LENGTH] = {CAN_FILTER_EMPTY};
+
 [[noreturn]] void fatal(const char *why)
 {
     // please remember to send \r\n everywhere because some terminals are stupid
@@ -33,7 +38,7 @@ void log_error(esp_err_t status)
         break;
 
     default:
-        Serial.printf("Err: ESP_ERR %x '%s'\r\n", status, esp_err_to_name(status));
+        Serial.printf("Err: ESP_ERR %lx '%s'\r\n", status, esp_err_to_name(status));
     }
 }
 
@@ -58,7 +63,7 @@ uint8_t char_to_nibble(char c)
     return 0b11110000;
 }
 
-esp_err_t transmit_message(char *input_string)
+esp_err_t transmit_message(char *input)
 {
     // Messages are input as "XXXXXX YYYYYYYYYYYY" where X's are the ID and those Y's are
     // up to TWAI_FRAME_MAX_DLC bytes... there is some extension allowed in weird
@@ -72,7 +77,7 @@ esp_err_t transmit_message(char *input_string)
     int index = 0;
     char c;
 
-    while ((c = input_string[index++]) && c != ' ')
+    while ((c = input[index++]) && c != ' ')
     {
         uint8_t nibble_or_death = char_to_nibble(c);
 
@@ -95,7 +100,7 @@ esp_err_t transmit_message(char *input_string)
 
     int data_index = 0;
     bool lower = false;
-    while ((c = input_string[index++]))
+    while ((c = input[index++]))
     {
         if (data_index >= TWAI_FRAME_MAX_DLC)
         {
@@ -128,6 +133,89 @@ esp_err_t transmit_message(char *input_string)
     return twai_transmit(&message, pdMS_TO_TICKS(50));
 }
 
+bool try_command(char **input, const char *prefix)
+{
+    // See if input starts with prefix. If so, return true and advance
+    // *input until the char after the space. Otherwise, return false and
+    // do not advance. Do not pass GO!
+
+    size_t prefix_length = strlen(prefix);
+
+    if (strncmp(*input, prefix, prefix_length) != 0)
+        return false;
+
+    *input += prefix_length;
+    return true;
+}
+
+void set_filter(char *params)
+{
+    while (*params == ' ')
+        params++;
+
+    if (strcmp(params, "clear") == 0)
+    {
+        Serial.println("Filter: Filter cleared.");
+        can_id_filter[0] = CAN_FILTER_EMPTY;
+        return;
+    }
+    else if (strncmp(params, "add", 3) == 0)
+    {
+        params += 3;
+
+        while (*params == ' ')
+            params++;
+
+        uint32_t can_id = 0;
+        char c;
+        while ((c = *(params++)) && c != ' ')
+        {
+            uint8_t nibble_or_death = char_to_nibble(c);
+
+            if (nibble_or_death >> 4)
+            {
+                Serial.printf("Err: Can't parse hex digit '%c'\r\n", c);
+                return;
+            }
+
+            can_id <<= 4;
+            can_id |= nibble_or_death;
+        }
+
+        Serial.printf("Filter: Adding %lx to CAN id filter\r\n", can_id);
+
+        for (int i = 0; i < CAN_FILTER_LENGTH; i++)
+        {
+            bool last = i == CAN_FILTER_LENGTH - 1;
+
+            if (can_id_filter[i] != CAN_FILTER_EMPTY)
+            {
+                if (last)
+                    Serial.println("Err: Filter list full");
+                continue;
+            }
+
+            can_id_filter[i] = can_id;
+            if (!last)
+                can_id_filter[i + 1] = CAN_FILTER_EMPTY;
+            break;
+        }
+    }
+}
+
+void submit_command(char *input)
+{
+    if (try_command(&input, "filter"))
+    {
+        set_filter(input);
+        return;
+    }
+
+    Serial.printf("Send: '%s'\r\n", input);
+    esp_err_t status = transmit_message(input);
+    log_error(status);
+}
+
 void setup()
 {
     Serial.begin(SERIAL_BAUD);
@@ -148,7 +236,8 @@ void setup()
         fatal("TWAI driver unable to start");
 
     Serial.println("Yay! Ready!");
-    Serial.println("Send a CAN packet with '<can id> <can data>', with both formatted as hex");
+    Serial.println("Send a CAN packet with '<can id> <can data>', with both formatted as hex.");
+    Serial.println("Try 'filter add <can id>' or 'filter clear' to filter what messages you recieve.");
 }
 
 void loop()
@@ -166,6 +255,24 @@ void loop()
             log_error(read_status);
             continue;
         }
+
+        // If empty, let everyone in
+        bool found = can_id_filter[0] == CAN_FILTER_EMPTY;
+
+        for (int i = 0; i < CAN_FILTER_LENGTH; i++)
+        {
+            if (can_id_filter[i] == CAN_FILTER_EMPTY)
+                break;
+
+            if (can_id_filter[i] != message.identifier)
+                continue;
+
+            found = true;
+            break;
+        }
+
+        if (!found)
+            continue;
 
         Serial.printf("Recv: [%lx] ' ", message.identifier);
         for (int i = 0; i < message.data_length_code; i++)
@@ -191,10 +298,8 @@ void loop()
                 continue;
 
             Serial.print("\r\n");
-            Serial.printf("Send: '%s'\r\n", input_buffer);
 
-            esp_err_t status = transmit_message(input_buffer);
-            log_error(status);
+            submit_command(input_buffer);
             input_buffer[0] = '\0';
             continue;
         }
